@@ -1,0 +1,120 @@
+---
+title: "Project"
+author: "William Robbins"
+date: "November 21, 2014"
+output: html_document
+---
+
+### Abstract
+It is the aim of this project to predict the performance quality of barbell lifting based on data from accelerometers attached to athletes. Model training and testing datasets are taken from the Human Activity Recognition study (HAR; http://groupware.les.inf.puc-rio.br/har). In this study, accelerometers were attached to the belt, forearm, arm, and dumbbell of each participant and accelerometer data was recorded as the participants performed an exercise improperly four times, then performed the exercise once with the correct form. The exercise professional conducting the experiment classified each repetition into one of five classes of quality (class or "classe"): A, B, C, D or E. A training dataset that includes the quality measure and accelerometer data for thousands of observations and a testing dataset with just accelerometer data -- that is, containing no measure of quality -- have been provided by the project. After transforming these data into a more usable form, we model the quality of exercises in the training set, then use this model to predict the quality measure for the observations in the test data. We find that our model describes the data reasonably accurately -- roughly $98$% accuracy in cross-validation data.  
+
+### Pre-Processing of Data
+The training dataset consists of 19,622 observations of 160 variables/observables. Upon inspection, it is clear that many of the 160 variable fields are blank and that the first seven columns do not contain accelerometer data. We trim the first seven columns and impute each empty cell with an 'NA' in the following manner. 
+```{r} 
+# read in data; impute blanks with NA; delete first seven columns
+temp  <- read.csv("pml-training.csv", na.strings="")
+train <- temp[,-c(1:7)]  
+temp  <- read.csv("pml-testing.csv", na.strings="")
+test  <- temp[,-c(1:7)]  
+dim(train)
+dim(test)
+```
+Further inspection of the column names suggests that a large number of the columns describe features of the distributions reported by the accelerometers. For example, kurtosis_roll_belt appears to be calculated once for sequential values of roll_belt and is plausibly the kurtosis of the distribution of roll_belt measurements. While these properties of the distributions may be relevant for determining the quality of an exercise, we opt to train on the individual accelerometer measurements and delete these columns from the training and testing datasets. To delete distribution properties from the training and test sets, we perform a string search on the column names.
+```{r}
+# remove columns with properties of distributions
+train[grep("kurtosis", names(train))] <- list(NULL);test[grep("kurtosis", names(test))] <- list(NULL)
+train[grep("avg", names(train))] <- list(NULL); test[grep("avg", names(test))] <- list(NULL)
+train[grep("max", names(train))] <- list(NULL); test[grep("max", names(test))] <- list(NULL)
+train[grep("min", names(train))] <- list(NULL); test[grep("min", names(test))] <- list(NULL)
+train[grep("var", names(train))] <- list(NULL); test[grep("var", names(test))] <- list(NULL)
+train[grep("std", names(train))] <- list(NULL); test[grep("std", names(test))] <- list(NULL)
+train[grep("skewness", names(train))] <- list(NULL); test[grep("skewness", names(test))] <- list(NULL)
+train[grep("amplitude", names(train))] <- list(NULL); test[grep("amplitude", names(test))] <- list(NULL)
+dim(train)  # leaving us with 53 columns/observables
+dim(test)
+```
+
+We need to know if any of the remaining 53 observables are correlated, so we'll create and plot the correlation matrix. 
+```{r corr corrplot, fig.height=4}
+library(caret)
+library(corrplot)
+corrMtrx <- cor(train[-dim(train)[2]],)
+corrplot(corrMtrx,type="upper",method="color",tl.col="black",tl.cex=0.6)
+```
+
+The absolute value of some of the correlation coefficients are greater than $0.5$, indicating a strong correlation between the parameters. For example, total_accel_belt appears to be strongly negatively correlated with accel_belt_z. While this makes complete sense -- total acceleration is presumably the three dimensional components of acceleration added in quadrature, we want to exclude one of these variables since they contain duplicated information. To do this, we'll simply place a cut of $0.5$ on the maximum allowed for the absolute value of the correlation coefficient. That is, we require $-0.5 <$ corr $< 0.5$ as follows.
+
+```{r corr corrplot findCorrelation, fig.height=4}
+correlatedIDs <- findCorrelation(corrMtrx,cutoff=0.5)
+uncorrTrain <- train[,-correlatedIDs]; uncorrTest <- test[,-correlatedIDs]
+dim(uncorrTrain)
+dim(uncorrTest)
+```
+
+Next we double-check to be certain that we're only left with weakly correlated variables and thus, have no redundant information. 
+```{r corr corrplot, fig.height=4}
+corrMtrx <- cor(uncorrTrain[-dim(uncorrTrain)[2]],)
+corrplot(corrMtrx,type="upper",method="color",tl.col="black",tl.cex=0.6)
+```
+
+We now have a data set consisting of 22 observables, none of which are strongly correlated. (Woo-hoo!)
+
+### Model & Training 
+Since we're performing a classification task, we'll use Breiman and Culter's Random Forrest algorithm (https://www.stat.berkeley.edu/~breiman/RandomForests/cc_home.htm). We'll also split our not-strongly-correlated training data into training and cross-validation sets with the typical 70/30 percent, respectively, split.
+
+```{r createDataPartition }
+# split uncorrelated training set into training & validation sets
+training <- createDataPartition(uncorrTrain$classe, p=0.7, list=FALSE)
+train    <- uncorrTrain[training,]
+valid    <- uncorrTrain[-training,]
+dim(train)
+dim(valid)
+```
+
+Then we fit the model using the training data and several cores.
+
+```{r}
+library(doMC)
+registerDoMC(cores=5)                        # use 5 cores (not CPUs)
+control = trainControl(method="repeatedcv")  # train with repeated cross-validation
+modFit <- train(classe ~., method="rf",data=train, trControl=control)
+```
+We now have a model for our data, but we need to get an estimate for how well the model performs. 
+
+### Cross-Validation
+Using our cross-validation data, we can get an estimate for the accuracy and out-of-sample error of our model from the confusion matrix between the prediction and the true value of the quality/class/classe observable. 
+
+```{r predict confusionMatrix}
+pred <- predict(modFit,newdata=valid)             # get model prediction
+confusMtrx <- confusionMatrix(pred,valid$classe)  # calculate confusion matrix 
+print(confusMtrx$table)                           # print matrix for posterity's sake
+```
+
+The accuracy is simply the ratio of correct predictions to total predictions. The out-of-sample error (OOSE) of our model is the percentage of incorrect predictions, or one minus the accuracy. 
+
+```{r sum}
+accuracy <- sum((pred==valid$classe))/dim(valid)[1] # number correct/ number possible
+OOSE     <- 1-accuracy                              # percentage missed
+print(accuracy)
+print(OOSE)
+```
+
+So we estimate that our prediction accuracy is roughly 98% and two out of every hundred predictions will be wrong.
+
+### Testing
+The stated aim of this project is to predict the quality ("classe") of exercises based upon data from attached accelerometers. Thus, we feed our testing data into our model and predict the following classe results. 
+
+```{r predict}
+# tabulate results for assignment
+ans <- predict(modFit,newdata=uncorrTest)
+print(ans)
+```
+
+### Conclusions
+Training a Random Forest model on weakly correlated data produced a cross-validation accuracy of roughly $98$%. Our testing results have been scored at 100% prediction accuracy by the automated grading script -- 20/20. For these small statistics, we expect an error in the range $4-5$ ($20-25$%) and therefore, our testing results are consistent with the accuracy of our cross-validation study. (Though I suspect that the test data were sufficiently well-massaged to be easily predictable.) We therefore consider the following procedure an effective means of predicting exercise quality given accelerometer data from the HAR study.  
+
+1) eliminate distribution-related variables (kurtosis et cetera)
+2) find and remove correlated variables
+3) train on 70% of training data, cross-validate with remaining 30%
+4) produce a model using the Random Forest algorithm with repeated cross-validation
+5) use model to predict exercise quality of data in which the exercise quality is unknown
